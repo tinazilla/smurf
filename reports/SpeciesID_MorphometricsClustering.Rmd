@@ -1,0 +1,146 @@
+---
+title: "SpeciedID_MorphometricsClustering"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(mclust)
+library(class)
+library(tools)
+library(lemon)
+```
+
+
+```{r}
+theme_set(theme_bw() +
+            theme(panel.grid = element_blank()))
+```
+
+
+```{r}
+smdatN <- read_csv(paste(here::here(), "/data/FERP_RodentData/DataMungingFiles/smdatN.csv", sep = ""))
+```
+
+
+## 1. Mclust: Assign consensus to morphometrics by individual
+
+
+```{r}
+smClust <- smdatN %>% 
+  filter(!is.na(species)) %>% 
+  mutate(species = ifelse(species == "boylii", "truei", species), 
+         species_together = ifelse(is.na(genus), NA, paste(genus, species, sep = " "))) %>% 
+  filter(!is.na(species_together)) %>% 
+  filter(!is.na(animal_weight) & !is.na(foot_length) & !is.na(ear_length) & !is.na(tail_length)) %>% 
+  arrange(species_together)
+
+```
+
+
+```{r, fig.height = 4, fig.width = 10}
+smClust %>%
+  filter(species_together != "Microtus californicus") %>% 
+  gather(c(animal_weight, tail_length, foot_length, ear_length), key = "measurement_type", value = "measurement") %>% 
+  ggplot(aes(x = species_together, y = measurement)) +
+  geom_violin(fill = "red", color = "white", alpha = 0.6) +
+  facet_rep_wrap(~measurement_type, scales = "free", nrow = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, fig.height = 3, fig.width = 10}
+lacF <- smClust %>%
+  filter(species_together %in% c("Peromyscus truei", "Peromyscus californicus")) %>% 
+  filter(reproduction %in% c("pregnant")) %>% 
+  gather(c(animal_weight, tail_length, foot_length, ear_length), key = "measurement_type", value = "measurement") 
+
+labs <- c("P. californicus", "P. truei")
+
+smClust %>%
+  filter(species_together %in% c("Peromyscus truei", "Peromyscus californicus")) %>% 
+  filter(!is.na(life_stage)) %>% 
+  gather(c(animal_weight, tail_length, foot_length, ear_length), key = "measurement_type", value = "measurement") %>% 
+  ggplot() +
+  geom_violin(aes(x = species_together, y = measurement, fill = life_stage), color = "white", alpha = 0.6) +
+  #geom_point(data = lacF, aes(x = species_together, y = measurement), position = position_dodge(width = 0.75)) +
+  facet_rep_wrap(~measurement_type, scales = "free", nrow = 1) +
+  scale_x_discrete(labels = labs) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+
+class <- smClust$species_together
+X <- smClust %>% dplyr::select(animal_weight, foot_length, ear_length, tail_length)
+
+mod2 <- MclustDA(X, class, modelType = "EDDA")
+summary(mod2)$tab
+
+plot(mod2, what = "scatterplot")
+```
+
+```{r}
+plot(mod2, what = "classification")
+
+```
+```{r}
+pred <- predict(mod2)
+smClust$predicted_species_mclust <- pred$classification
+
+smClustMismatch <- smClust %>%
+  filter(species_together != predicted_species_mclust)
+
+smClustMismatch %>%   
+  ggplot() +
+  geom_point(aes(x = predicted_species_mclust, y = animal_weight))
+```
+
+## 2. knn: Assign consensus to morphometrics by individual
+
+```{r}
+smTrain <- smdatN %>%
+  mutate(species = ifelse(species == "boylii", "truei", species), 
+         species_together = ifelse(is.na(genus), NA, paste(genus, species, sep = " "))) %>% 
+  filter(species_together %in% c("Peromyscus truei", "Peromyscus californicus")) %>% 
+  filter(!is.na(animal_weight) & !is.na(foot_length) & !is.na(ear_length) & !is.na(tail_length) & !is.na(life_stage)) %>% 
+  mutate(key = paste(species_together, life_stage, sep = "_")) %>% 
+  arrange(key)
+
+smTest <- smdatN %>% 
+  mutate(species = ifelse(species == "boylii", "truei", species), 
+         species_together = ifelse(is.na(genus), NA, paste(genus, species, sep = " "))) %>% 
+  filter(species_together %in% c("Peromyscus truei", "Peromyscus californicus")) %>% 
+  filter(!is.na(animal_weight) & !is.na(tail_length)) 
+
+train <- smTrain %>% dplyr::select(animal_weight, tail_length)
+test <- smTest %>% dplyr::select(animal_weight, tail_length)
+cl <- factor(smTrain$key)
+
+smTest$test_out <- knn(train, test, cl, k = 5, prob = TRUE)
+smKnnMismatch <- smTest %>% 
+  separate(test_out, into = c("predicted_species_knn", "life_stage"), sep = "_") %>% 
+  dplyr::select(tag_id, animal_weight, tail_length, species_together, predicted_species_knn, life_stage, reproduction) %>% 
+  filter(species_together != predicted_species_knn) 
+```
+
+```{r}
+smMismatch <- smClustMismatch %>%
+  dplyr::select(tag_id, species_together, animal_weight, tail_length, life_stage, predicted_species_mclust) %>% 
+  full_join(smKnnMismatch) 
+
+same <- smMismatch %>% filter(predicted_species_mclust == predicted_species_knn) %>% nrow(.)
+
+diff <- nrow(smMismatch)
+
+```
+
+How many ID's were ID'd as the same with knn and mclust, and how many differed?
+`r same` animals both ID'd as the same with knn and mclust; `r diff` different animals ID'd differently between knn and mclust
+
+
